@@ -4,6 +4,7 @@ import base64 as _b64
 import json
 import os
 import posixpath
+import subprocess
 import time
 
 
@@ -98,3 +99,68 @@ def log_usage(cmd, ok, ms, error):
     })
     with open(os.path.join(usage_dir(), "usage.jsonl"), "a") as f:
         f.write(line + "\n")
+
+
+def gh(args, stdin=None):
+    proc = subprocess.run(
+        ["gh"] + args,
+        input=stdin,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip()
+        low = err.lower()
+        if "auth" in low or "not logged" in low:
+            raise GitxError(2, f"gh not authenticated: {err}")
+        raise GitxError(1, f"gh {' '.join(args)} failed: {err}")
+    return proc.stdout
+
+
+def resolve_repo(explicit):
+    if explicit:
+        return explicit
+    out = gh(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]).strip()
+    if not out:
+        raise GitxError(3, "not in a git repo; pass --repo owner/name")
+    return out
+
+
+def repo_default_branch(repo):
+    return gh([
+        "repo", "view", repo, "--json", "defaultBranchRef",
+        "-q", ".defaultBranchRef.name",
+    ]).strip()
+
+
+_REF_QUERY = """query($owner:String!,$name:String!,$qual:String!){
+  repository(owner:$owner,name:$name){ ref(qualifiedName:$qual){ target{ oid } } }
+}"""
+
+
+def branch_head_oid(repo, branch):
+    owner, name = repo.split("/", 1)
+    out = gh([
+        "api", "graphql",
+        "-f", f"query={_REF_QUERY}",
+        "-F", f"owner={owner}", "-F", f"name={name}",
+        "-F", f"qual=refs/heads/{branch}",
+        "-q", ".data.repository.ref.target.oid",
+    ]).strip()
+    return out or None
+
+
+def ensure_branch(repo, branch, from_ref):
+    oid = branch_head_oid(repo, branch)
+    if oid:
+        return oid
+    base = from_ref or repo_default_branch(repo)
+    base_oid = branch_head_oid(repo, base)
+    if not base_oid:
+        raise GitxError(3, f"base ref {base!r} not found in {repo}")
+    gh([
+        "api", "-X", "POST", f"/repos/{repo}/git/refs",
+        "-f", f"ref=refs/heads/{branch}",
+        "-f", f"sha={base_oid}",
+    ])
+    return base_oid

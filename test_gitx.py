@@ -92,3 +92,30 @@ def test_log_usage_appends_jsonl(tmp_path, monkeypatch):
     assert first["error"] is None and "ts" in first
     second = json.loads(lines[1])
     assert second["ok"] is False and second["error"] == "not found"
+
+
+def test_gh_maps_auth_error(monkeypatch):
+    class FakeProc:
+        returncode = 1
+        stdout = ""
+        stderr = "gh auth login required"
+
+    def fake_run(*a, **k):
+        return FakeProc()
+
+    monkeypatch.setattr(gitx.subprocess, "run", fake_run)
+    with pytest.raises(gitx.GitxError) as e:
+        gitx.gh(["repo", "view"])
+    assert e.value.code == 2
+
+
+def test_gh_maps_general_error(monkeypatch):
+    class FakeProc:
+        returncode = 1
+        stdout = ""
+        stderr = "some other failure"
+
+    monkeypatch.setattr(gitx.subprocess, "run", lambda *a, **k: FakeProc())
+    with pytest.raises(gitx.GitxError) as e:
+        gitx.gh(["repo", "view"])
+    assert e.value.code == 1

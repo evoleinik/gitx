@@ -8,6 +8,7 @@ import posixpath
 import subprocess
 import sys
 import time
+from urllib.parse import quote
 
 
 class GitxError(Exception):
@@ -179,8 +180,12 @@ def _read_files(paths):
     files = []
     for p in paths:
         repo_path = validate_repo_path(p)
-        with open(p, "rb") as fh:
-            files.append((repo_path, fh.read()))
+        try:
+            with open(p, "rb") as fh:
+                data = fh.read()
+        except (FileNotFoundError, IsADirectoryError, PermissionError) as e:
+            raise GitxError(3, f"cannot read {p}: {e}")
+        files.append((repo_path, data))
     return files
 
 
@@ -212,12 +217,14 @@ def cmd_cat(args):
     ref, path = parse_ref_path(args.ref_path)
     repo = resolve_repo(args.repo)
     try:
-        out = gh(["api", f"/repos/{repo}/contents/{path}", "-f", f"ref={ref}"])
+        out = gh(["api", f"/repos/{repo}/contents/{path}?ref={quote(ref, safe='')}"])
     except GitxError as e:
         if "404" in e.msg:
             raise GitxError(3, f"{ref}:{path} not found in {repo}")
         raise
     payload = json.loads(out)
+    if isinstance(payload, list) or payload.get("type") != "file":
+        raise GitxError(3, f"{ref}:{path} is not a file in {repo}")
     content = _b64.b64decode(payload["content"]).decode("utf-8", "replace")
     return {
         "ref": ref, "path": path,
@@ -255,9 +262,15 @@ def _print_usage():
     n = ok = 0
     with open(path) as f:
         for line in f:
-            rec = json.loads(line)
-            n += 1
-            ok += 1 if rec["ok"] else 0
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                n += 1
+                ok += 1 if rec.get("ok") else 0
+            except (ValueError, KeyError):
+                continue
     print(json.dumps({"calls": n, "ok": ok, "fail": n - ok}))
     return 0
 

@@ -182,20 +182,40 @@ def test_read_files_rejects_parent_escape():
     assert e.value.code == 3
 
 
+def test_read_files_missing_file_exit3():
+    with pytest.raises(gitx.GitxError) as e:
+        gitx._read_files(["definitely-missing-file.md"])
+    assert e.value.code == 3
+
+
 def test_cmd_cat_decodes_content(monkeypatch):
     monkeypatch.setattr(gitx, "resolve_repo", lambda e: "owner/repo")
-    payload = {
-        "sha": "blobsha", "size": 5,
-        "content": base64.b64encode(b"hello").decode(), "encoding": "base64",
-    }
-    monkeypatch.setattr(gitx, "gh", lambda a, stdin=None: json.dumps(payload))
+    seen = {}
+    payload = {"sha": "blobsha", "size": 5, "type": "file",
+               "content": base64.b64encode(b"hello").decode(), "encoding": "base64"}
+    def fake_gh(a, stdin=None):
+        seen["args"] = a
+        return json.dumps(payload)
+    monkeypatch.setattr(gitx, "gh", fake_gh)
     import argparse
     args = argparse.Namespace(ref_path="main:docs/a.md", repo=None, json=True)
     result = gitx.cmd_cat(args)
-    assert result == {
-        "ref": "main", "path": "docs/a.md",
-        "sha": "blobsha", "size": 5, "content": "hello",
-    }
+    assert result == {"ref": "main", "path": "docs/a.md",
+                      "sha": "blobsha", "size": 5, "content": "hello"}
+    assert "-f" not in seen["args"] and "-F" not in seen["args"]
+    assert any("?ref=main" in str(x) for x in seen["args"])
+
+
+def test_cmd_cat_directory_exit3(monkeypatch):
+    monkeypatch.setattr(gitx, "resolve_repo", lambda e: "owner/repo")
+    def fake_gh(a, stdin=None):
+        return json.dumps([{"name": "a.md"}])
+    monkeypatch.setattr(gitx, "gh", fake_gh)
+    import argparse
+    args = argparse.Namespace(ref_path="main:docs", repo=None, json=True)
+    with pytest.raises(gitx.GitxError) as e:
+        gitx.cmd_cat(args)
+    assert e.value.code == 3
 
 
 def test_cmd_cat_404_guides(monkeypatch):

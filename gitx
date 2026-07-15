@@ -19,3 +19,13 @@ def validate_repo_path(path):
     if norm.startswith("..") or norm == "." or norm.startswith("/"):
         raise GitxError(3, f"path escapes repo root: {path!r}")
     return norm
+
+
+def parse_ref_path(arg):
+    """Split '<ref>:<path>' into (ref, repo_path). Path is validated."""
+    if ":" not in arg:
+        raise GitxError(3, f"expected <ref>:<path>, got {arg!r}")
+    ref, _, path = arg.partition(":")
+    if not ref or not path:
+        raise GitxError(3, f"empty ref or path in {arg!r}")
+    return ref, validate_repo_path(path)

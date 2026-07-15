@@ -26,3 +26,24 @@ def test_validate_repo_path_rejects_parent_escape():
     with pytest.raises(gitx.GitxError) as e:
         gitx.validate_repo_path("../secrets.md")
     assert e.value.code == 3
+
+
+def test_parse_ref_path_basic():
+    assert gitx.parse_ref_path("main:docs/x.md") == ("main", "docs/x.md")
+
+
+def test_parse_ref_path_first_colon_only():
+    # a ref never contains ':'; path never does either, but split on first is safe
+    assert gitx.parse_ref_path("feature/x:a/b.md") == ("feature/x", "a/b.md")
+
+
+def test_parse_ref_path_missing_colon():
+    with pytest.raises(gitx.GitxError) as e:
+        gitx.parse_ref_path("main-docs-x.md")
+    assert e.value.code == 3
+
+
+def test_parse_ref_path_rejects_bad_path():
+    with pytest.raises(gitx.GitxError) as e:
+        gitx.parse_ref_path("main:/etc/passwd")
+    assert e.value.code == 3

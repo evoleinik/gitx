@@ -225,6 +225,21 @@ def cmd_cat(args):
     }
 
 
+def cmd_pr(args):
+    repo = resolve_repo(args.repo)
+    url = gh([
+        "pr", "create", "--repo", repo,
+        "--base", args.base, "--head", args.head,
+        "--title", args.title, "--body", args.body,
+    ]).strip().splitlines()[-1].strip()
+    view = json.loads(gh([
+        "pr", "view", url, "--repo", repo, "--json", "number,url",
+    ]))
+    if args.merge:
+        gh(["pr", "merge", url, "--repo", repo, "--auto", "--squash"])
+    return {"number": view["number"], "url": view["url"]}
+
+
 def _emit(result, as_json, human):
     if as_json:
         print(json.dumps(result))
@@ -265,6 +280,15 @@ def main(argv=None):
     p_cat.add_argument("--repo")
     p_cat.add_argument("--json", action="store_true")
 
+    p_pr = sub.add_parser("pr", help="open (and optionally auto-merge) a PR")
+    p_pr.add_argument("base")
+    p_pr.add_argument("head")
+    p_pr.add_argument("--title", required=True)
+    p_pr.add_argument("--body", required=True)
+    p_pr.add_argument("--merge", action="store_true")
+    p_pr.add_argument("--repo")
+    p_pr.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
     if args.usage:
         return _print_usage()
@@ -280,6 +304,9 @@ def main(argv=None):
         elif args.cmd == "cat":
             result = cmd_cat(args)
             _emit(result, args.json, result["content"])
+        elif args.cmd == "pr":
+            result = cmd_pr(args)
+            _emit(result, args.json, f"#{result['number']} {result['url']}")
         else:
             parser.print_help()
             return 1

@@ -210,3 +210,51 @@ def test_cmd_cat_404_guides(monkeypatch):
     with pytest.raises(gitx.GitxError) as e:
         gitx.cmd_cat(args)
     assert e.value.code == 3
+
+
+def test_cmd_pr_creates_and_optionally_merges(monkeypatch):
+    monkeypatch.setattr(gitx, "resolve_repo", lambda e: "owner/repo")
+    seen = []
+
+    def fake_gh(a, stdin=None):
+        seen.append(a)
+        if a[:2] == ["pr", "create"]:
+            return "https://github.com/owner/repo/pull/7\n"
+        if a[:2] == ["pr", "view"]:
+            return json.dumps({"number": 7, "url": "https://github.com/owner/repo/pull/7"})
+        if a[:2] == ["pr", "merge"]:
+            return ""
+        raise AssertionError(a)
+
+    monkeypatch.setattr(gitx, "gh", fake_gh)
+    import argparse
+    args = argparse.Namespace(
+        base="main", head="feature-x", title="T", body="B",
+        merge=True, repo=None, json=True,
+    )
+    result = gitx.cmd_pr(args)
+    assert result == {"number": 7, "url": "https://github.com/owner/repo/pull/7"}
+    assert any(a[:2] == ["pr", "merge"] for a in seen)
+
+
+def test_cmd_pr_no_merge_when_flag_absent(monkeypatch):
+    monkeypatch.setattr(gitx, "resolve_repo", lambda e: "owner/repo")
+    seen = []
+
+    def fake_gh(a, stdin=None):
+        seen.append(a)
+        if a[:2] == ["pr", "create"]:
+            return "https://github.com/owner/repo/pull/9\n"
+        if a[:2] == ["pr", "view"]:
+            return json.dumps({"number": 9, "url": "https://github.com/owner/repo/pull/9"})
+        raise AssertionError(a)
+
+    monkeypatch.setattr(gitx, "gh", fake_gh)
+    import argparse
+    args = argparse.Namespace(
+        base="main", head="feature-x", title="T", body="B",
+        merge=False, repo=None, json=True,
+    )
+    result = gitx.cmd_pr(args)
+    assert result["number"] == 9
+    assert not any(a[:2] == ["pr", "merge"] for a in seen)

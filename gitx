@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+"""gitx — stateless git lane for agents. See README.md."""
+import os
+import posixpath
+
+
+class GitxError(Exception):
+    def __init__(self, code, msg):
+        super().__init__(msg)
+        self.code = code
+        self.msg = msg
+
+
+def validate_repo_path(path):
+    """Return a clean repo-relative POSIX path, or raise GitxError(3)."""
+    if path.startswith("/") or os.path.isabs(path):
+        raise GitxError(3, f"path must be repo-relative, got absolute: {path!r}")
+    norm = posixpath.normpath(path)
+    if norm.startswith("..") or norm == "." or norm.startswith("/"):
+        raise GitxError(3, f"path escapes repo root: {path!r}")
+    return norm

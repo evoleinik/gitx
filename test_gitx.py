@@ -1,6 +1,7 @@
 import base64
 import importlib.machinery
 import importlib.util
+import json
 import os
 
 _here = os.path.dirname(os.path.abspath(__file__))
@@ -72,3 +73,22 @@ def test_build_commit_body_shape():
 def test_build_commit_body_mutation_names_the_field():
     assert "createCommitOnBranch" in gitx.COMMIT_MUTATION
     assert "oid" in gitx.COMMIT_MUTATION and "url" in gitx.COMMIT_MUTATION
+
+
+def test_is_stale_head_error():
+    assert gitx.is_stale_head_error("Expected branch to point to ... but it did not")
+    assert gitx.is_stale_head_error("the branch is at a different oid than expected")
+    assert not gitx.is_stale_head_error("Resource not accessible by integration")
+
+
+def test_log_usage_appends_jsonl(tmp_path, monkeypatch):
+    monkeypatch.setenv("GITX_HOME", str(tmp_path))
+    gitx.log_usage("put", True, 42, None)
+    gitx.log_usage("cat", False, 7, "not found")
+    lines = (tmp_path / "usage.jsonl").read_text().strip().splitlines()
+    assert len(lines) == 2
+    first = json.loads(lines[0])
+    assert first["cmd"] == "put" and first["ok"] is True and first["ms"] == 42
+    assert first["error"] is None and "ts" in first
+    second = json.loads(lines[1])
+    assert second["ok"] is False and second["error"] == "not found"

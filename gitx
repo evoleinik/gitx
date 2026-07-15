@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """gitx — stateless git lane for agents. See README.md."""
 import base64 as _b64
+import json
 import os
 import posixpath
+import time
 
 
 class GitxError(Exception):
@@ -70,3 +72,29 @@ def build_commit_body(repo, branch, message, head_oid, files):
             }
         },
     }
+
+
+def is_stale_head_error(stderr):
+    """Return True if stderr indicates an expected-head-OID mismatch (stale HEAD)."""
+    s = stderr.lower()
+    return "expected" in s or "is at" in s or "stale" in s
+
+
+def usage_dir():
+    """Return the usage telemetry directory, honoring $GITX_HOME. Creates it if absent."""
+    d = os.environ.get("GITX_HOME") or os.path.join(os.path.expanduser("~"), ".gitx")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def log_usage(cmd, ok, ms, error):
+    """Append one JSON line to usage_dir()/usage.jsonl with telemetry."""
+    line = json.dumps({
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "cmd": cmd,
+        "ok": ok,
+        "ms": ms,
+        "error": error,
+    })
+    with open(os.path.join(usage_dir(), "usage.jsonl"), "a") as f:
+        f.write(line + "\n")

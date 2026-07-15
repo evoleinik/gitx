@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """gitx — stateless git lane for agents. See README.md."""
+import base64 as _b64
 import os
 import posixpath
 
@@ -29,3 +30,43 @@ def parse_ref_path(arg):
     if not ref or not path:
         raise GitxError(3, f"empty ref or path in {arg!r}")
     return ref, validate_repo_path(path)
+
+
+COMMIT_MUTATION = """mutation($input: CreateCommitOnBranchInput!) {
+  createCommitOnBranch(input: $input) {
+    commit { oid url }
+  }
+}"""
+
+
+def build_commit_body(repo, branch, message, head_oid, files):
+    """Return a GraphQL request body for createCommitOnBranch mutation.
+
+    Args:
+        repo: Repository in 'owner/repo' format.
+        branch: Branch name.
+        message: Commit message (headline).
+        head_oid: Expected HEAD OID.
+        files: List of (path, bytes) tuples. Contents are base64-encoded.
+
+    Returns:
+        Dict with 'query' and 'variables' keys ready for 'gh api graphql --input -'.
+    """
+    additions = [
+        {"path": path, "contents": _b64.b64encode(data).decode("ascii")}
+        for path, data in files
+    ]
+    return {
+        "query": COMMIT_MUTATION,
+        "variables": {
+            "input": {
+                "branch": {
+                    "repositoryNameWithOwner": repo,
+                    "branchName": branch,
+                },
+                "message": {"headline": message},
+                "expectedHeadOid": head_oid,
+                "fileChanges": {"additions": additions},
+            }
+        },
+    }

@@ -1,3 +1,4 @@
+import base64
 import importlib.machinery
 import importlib.util
 import os
@@ -47,3 +48,27 @@ def test_parse_ref_path_rejects_bad_path():
     with pytest.raises(gitx.GitxError) as e:
         gitx.parse_ref_path("main:/etc/passwd")
     assert e.value.code == 3
+
+
+def test_build_commit_body_shape():
+    body = gitx.build_commit_body(
+        "owner/repo", "feature-x", "add stuff", "abc123",
+        [("docs/a.md", b"hello"), ("b.txt", b"world")],
+    )
+    assert body["query"] == gitx.COMMIT_MUTATION
+    inp = body["variables"]["input"]
+    assert inp["branch"] == {
+        "repositoryNameWithOwner": "owner/repo",
+        "branchName": "feature-x",
+    }
+    assert inp["message"] == {"headline": "add stuff"}
+    assert inp["expectedHeadOid"] == "abc123"
+    adds = inp["fileChanges"]["additions"]
+    assert [a["path"] for a in adds] == ["docs/a.md", "b.txt"]
+    assert base64.b64decode(adds[0]["contents"]) == b"hello"
+    assert base64.b64decode(adds[1]["contents"]) == b"world"
+
+
+def test_build_commit_body_mutation_names_the_field():
+    assert "createCommitOnBranch" in gitx.COMMIT_MUTATION
+    assert "oid" in gitx.COMMIT_MUTATION and "url" in gitx.COMMIT_MUTATION

@@ -178,10 +178,7 @@ def run_commit(repo, branch, message, head_oid, files):
 def _read_files(paths):
     files = []
     for p in paths:
-        if os.path.isabs(p):
-            repo_path = os.path.basename(p)
-        else:
-            repo_path = validate_repo_path(p)
+        repo_path = validate_repo_path(p)
         with open(p, "rb") as fh:
             files.append((repo_path, fh.read()))
     return files

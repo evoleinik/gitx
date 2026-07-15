@@ -123,9 +123,8 @@ def test_gh_maps_general_error(monkeypatch):
 
 def test_cmd_put_retries_once_on_stale_head(monkeypatch, tmp_path):
     monkeypatch.setenv("GITX_HOME", str(tmp_path))
-    f = tmp_path / "note.md"
-    f.write_text("hi")
 
+    monkeypatch.setattr(gitx, "_read_files", lambda paths: [("note.md", b"hi")])
     monkeypatch.setattr(gitx, "resolve_repo", lambda e: "owner/repo")
     monkeypatch.setattr(gitx, "ensure_branch", lambda r, b, fr: "oid-1")
     # first commit attempt stale, second succeeds
@@ -142,7 +141,7 @@ def test_cmd_put_retries_once_on_stale_head(monkeypatch, tmp_path):
 
     import argparse
     args = argparse.Namespace(
-        branch="feature-x", paths=[str(f)], message="m",
+        branch="feature-x", paths=["note.md"], message="m",
         repo=None, from_ref=None, json=True,
     )
     result = gitx.cmd_put(args)
@@ -152,8 +151,7 @@ def test_cmd_put_retries_once_on_stale_head(monkeypatch, tmp_path):
 
 def test_cmd_put_gives_up_after_second_stale(monkeypatch, tmp_path):
     monkeypatch.setenv("GITX_HOME", str(tmp_path))
-    f = tmp_path / "note.md"
-    f.write_text("hi")
+    monkeypatch.setattr(gitx, "_read_files", lambda paths: [("note.md", b"hi")])
     monkeypatch.setattr(gitx, "resolve_repo", lambda e: "owner/repo")
     monkeypatch.setattr(gitx, "ensure_branch", lambda r, b, fr: "oid-1")
     monkeypatch.setattr(gitx, "branch_head_oid", lambda r, b: "oid-2")
@@ -164,9 +162,21 @@ def test_cmd_put_gives_up_after_second_stale(monkeypatch, tmp_path):
     monkeypatch.setattr(gitx, "run_commit", always_stale)
     import argparse
     args = argparse.Namespace(
-        branch="feature-x", paths=[str(f)], message="m",
+        branch="feature-x", paths=["note.md"], message="m",
         repo=None, from_ref=None, json=True,
     )
     with pytest.raises(gitx.GitxError) as e:
         gitx.cmd_put(args)
     assert e.value.code == 4
+
+
+def test_read_files_rejects_absolute_path():
+    with pytest.raises(gitx.GitxError) as e:
+        gitx._read_files(["/etc/passwd"])
+    assert e.value.code == 3
+
+
+def test_read_files_rejects_parent_escape():
+    with pytest.raises(gitx.GitxError) as e:
+        gitx._read_files(["../secrets.md"])
+    assert e.value.code == 3

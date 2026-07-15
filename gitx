@@ -208,6 +208,23 @@ def cmd_put(args):
     }
 
 
+def cmd_cat(args):
+    ref, path = parse_ref_path(args.ref_path)
+    repo = resolve_repo(args.repo)
+    try:
+        out = gh(["api", f"/repos/{repo}/contents/{path}", "-f", f"ref={ref}"])
+    except GitxError as e:
+        if "404" in e.msg:
+            raise GitxError(3, f"{ref}:{path} not found in {repo}")
+        raise
+    payload = json.loads(out)
+    content = _b64.b64decode(payload["content"]).decode("utf-8", "replace")
+    return {
+        "ref": ref, "path": path,
+        "sha": payload["sha"], "size": payload["size"], "content": content,
+    }
+
+
 def _emit(result, as_json, human):
     if as_json:
         print(json.dumps(result))
@@ -243,6 +260,11 @@ def main(argv=None):
     p_put.add_argument("--from", dest="from_ref")
     p_put.add_argument("--json", action="store_true")
 
+    p_cat = sub.add_parser("cat", help="read a file at a ref")
+    p_cat.add_argument("ref_path", metavar="<ref>:<path>")
+    p_cat.add_argument("--repo")
+    p_cat.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
     if args.usage:
         return _print_usage()
@@ -255,6 +277,9 @@ def main(argv=None):
         if args.cmd == "put":
             result = cmd_put(args)
             _emit(result, args.json, f"{result['sha'][:8]} {result['url']}")
+        elif args.cmd == "cat":
+            result = cmd_cat(args)
+            _emit(result, args.json, result["content"])
         else:
             parser.print_help()
             return 1

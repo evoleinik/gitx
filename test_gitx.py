@@ -180,3 +180,33 @@ def test_read_files_rejects_parent_escape():
     with pytest.raises(gitx.GitxError) as e:
         gitx._read_files(["../secrets.md"])
     assert e.value.code == 3
+
+
+def test_cmd_cat_decodes_content(monkeypatch):
+    monkeypatch.setattr(gitx, "resolve_repo", lambda e: "owner/repo")
+    payload = {
+        "sha": "blobsha", "size": 5,
+        "content": base64.b64encode(b"hello").decode(), "encoding": "base64",
+    }
+    monkeypatch.setattr(gitx, "gh", lambda a, stdin=None: json.dumps(payload))
+    import argparse
+    args = argparse.Namespace(ref_path="main:docs/a.md", repo=None, json=True)
+    result = gitx.cmd_cat(args)
+    assert result == {
+        "ref": "main", "path": "docs/a.md",
+        "sha": "blobsha", "size": 5, "content": "hello",
+    }
+
+
+def test_cmd_cat_404_guides(monkeypatch):
+    monkeypatch.setattr(gitx, "resolve_repo", lambda e: "owner/repo")
+
+    def fake_gh(a, stdin=None):
+        raise gitx.GitxError(1, "gh api ... HTTP 404: Not Found")
+
+    monkeypatch.setattr(gitx, "gh", fake_gh)
+    import argparse
+    args = argparse.Namespace(ref_path="main:missing.md", repo=None, json=True)
+    with pytest.raises(gitx.GitxError) as e:
+        gitx.cmd_cat(args)
+    assert e.value.code == 3

@@ -119,3 +119,54 @@ def test_gh_maps_general_error(monkeypatch):
     with pytest.raises(gitx.GitxError) as e:
         gitx.gh(["repo", "view"])
     assert e.value.code == 1
+
+
+def test_cmd_put_retries_once_on_stale_head(monkeypatch, tmp_path):
+    monkeypatch.setenv("GITX_HOME", str(tmp_path))
+    f = tmp_path / "note.md"
+    f.write_text("hi")
+
+    monkeypatch.setattr(gitx, "resolve_repo", lambda e: "owner/repo")
+    monkeypatch.setattr(gitx, "ensure_branch", lambda r, b, fr: "oid-1")
+    # first commit attempt stale, second succeeds
+    calls = {"n": 0}
+
+    def fake_run_commit(repo, branch, message, head_oid, files):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise gitx.GitxError(1, "Expected branch head oid mismatch")
+        return {"sha": "deadbeef", "url": "https://gh/commit/deadbeef"}
+
+    monkeypatch.setattr(gitx, "run_commit", fake_run_commit)
+    monkeypatch.setattr(gitx, "branch_head_oid", lambda r, b: "oid-2")
+
+    import argparse
+    args = argparse.Namespace(
+        branch="feature-x", paths=[str(f)], message="m",
+        repo=None, from_ref=None, json=True,
+    )
+    result = gitx.cmd_put(args)
+    assert result["sha"] == "deadbeef"
+    assert calls["n"] == 2  # retried exactly once
+
+
+def test_cmd_put_gives_up_after_second_stale(monkeypatch, tmp_path):
+    monkeypatch.setenv("GITX_HOME", str(tmp_path))
+    f = tmp_path / "note.md"
+    f.write_text("hi")
+    monkeypatch.setattr(gitx, "resolve_repo", lambda e: "owner/repo")
+    monkeypatch.setattr(gitx, "ensure_branch", lambda r, b, fr: "oid-1")
+    monkeypatch.setattr(gitx, "branch_head_oid", lambda r, b: "oid-2")
+
+    def always_stale(*a, **k):
+        raise gitx.GitxError(1, "Expected head mismatch")
+
+    monkeypatch.setattr(gitx, "run_commit", always_stale)
+    import argparse
+    args = argparse.Namespace(
+        branch="feature-x", paths=[str(f)], message="m",
+        repo=None, from_ref=None, json=True,
+    )
+    with pytest.raises(gitx.GitxError) as e:
+        gitx.cmd_put(args)
+    assert e.value.code == 4

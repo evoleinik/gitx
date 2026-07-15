@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """gitx — stateless git lane for agents. See README.md."""
+import argparse
 import base64 as _b64
 import json
 import os
 import posixpath
 import subprocess
+import sys
 import time
 
 
@@ -164,3 +166,108 @@ def ensure_branch(repo, branch, from_ref):
         "-f", f"sha={base_oid}",
     ])
     return base_oid
+
+
+def run_commit(repo, branch, message, head_oid, files):
+    body = build_commit_body(repo, branch, message, head_oid, files)
+    out = gh(["api", "graphql", "--input", "-"], stdin=json.dumps(body))
+    data = json.loads(out)["data"]["createCommitOnBranch"]["commit"]
+    return {"sha": data["oid"], "url": data["url"]}
+
+
+def _read_files(paths):
+    files = []
+    for p in paths:
+        if os.path.isabs(p):
+            repo_path = os.path.basename(p)
+        else:
+            repo_path = validate_repo_path(p)
+        with open(p, "rb") as fh:
+            files.append((repo_path, fh.read()))
+    return files
+
+
+def cmd_put(args):
+    repo = resolve_repo(args.repo)
+    head = ensure_branch(repo, args.branch, args.from_ref)
+    files = _read_files(args.paths)
+    try:
+        commit = run_commit(repo, args.branch, args.message, head, files)
+    except GitxError as e:
+        if not is_stale_head_error(e.msg):
+            raise
+        head = branch_head_oid(repo, args.branch)
+        try:
+            commit = run_commit(repo, args.branch, args.message, head, files)
+        except GitxError as e2:
+            if is_stale_head_error(e2.msg):
+                raise GitxError(4, f"head moved twice under us on {args.branch}; retry")
+            raise
+    return {
+        "sha": commit["sha"],
+        "url": commit["url"],
+        "branch": args.branch,
+        "files": [p for p, _ in files],
+    }
+
+
+def _emit(result, as_json, human):
+    if as_json:
+        print(json.dumps(result))
+    else:
+        print(human)
+
+
+def _print_usage():
+    path = os.path.join(usage_dir(), "usage.jsonl")
+    if not os.path.exists(path):
+        print("no usage yet", file=sys.stderr)
+        return 0
+    n = ok = 0
+    with open(path) as f:
+        for line in f:
+            rec = json.loads(line)
+            n += 1
+            ok += 1 if rec["ok"] else 0
+    print(json.dumps({"calls": n, "ok": ok, "fail": n - ok}))
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="gitx")
+    parser.add_argument("--usage", action="store_true", help="print usage stats and exit")
+    sub = parser.add_subparsers(dest="cmd")
+
+    p_put = sub.add_parser("put", help="atomic commit of files to a branch")
+    p_put.add_argument("branch")
+    p_put.add_argument("paths", nargs="+")
+    p_put.add_argument("-m", "--message", required=True)
+    p_put.add_argument("--repo")
+    p_put.add_argument("--from", dest="from_ref")
+    p_put.add_argument("--json", action="store_true")
+
+    args = parser.parse_args(argv)
+    if args.usage:
+        return _print_usage()
+    if not args.cmd:
+        parser.print_help()
+        return 1
+
+    start = time.time()
+    try:
+        if args.cmd == "put":
+            result = cmd_put(args)
+            _emit(result, args.json, f"{result['sha'][:8]} {result['url']}")
+        else:
+            parser.print_help()
+            return 1
+        log_usage(args.cmd, True, int((time.time() - start) * 1000), None)
+        return 0
+    except GitxError as e:
+        print(e.msg, file=sys.stderr)
+        log_usage(args.cmd, False, int((time.time() - start) * 1000), e.msg)
+        return e.code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

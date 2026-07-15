@@ -19,9 +19,11 @@ echo "put ok: $SHA"
 # cat back the committed file (path in repo is hello.md, same as what we passed)
 GOT=$("$GITX" cat "$BR:hello.md" --repo "$GITX_SMOKE_REPO")
 echo "cat: $GOT"
+[[ "$GOT" == smoke* ]] || { echo "FAIL: cat returned wrong content: $GOT" >&2; exit 1; }
 
 # open a PR then close it + delete branch (cleanup)
 URL=$("$GITX" pr main "$BR" --title "smoke" --body "smoke" --repo "$GITX_SMOKE_REPO" --json | python3 -c 'import sys,json;print(json.load(sys.stdin)["url"])')
 echo "pr: $URL"
-gh pr close "$URL" --repo "$GITX_SMOKE_REPO" --delete-branch
+PR_NUM=$(basename "$URL")
+gh pr close "$PR_NUM" --repo "$GITX_SMOKE_REPO" --delete-branch
 echo "SMOKE OK"

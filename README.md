@@ -19,6 +19,11 @@ no cwd, HEAD, index, or working tree to get wrong. Thin wrapper over
 commits atomically (server-signed), retries once on a concurrent-push head
 conflict. Repo defaults to the cwd `origin`; `--repo` overrides.
 
+`cat` serves **text**. Above 1MB the GitHub contents API returns an empty body at
+HTTP 200, so `cat` auto-escalates to the blobs API by sha (100MB cap) rather than
+reporting a real file as empty. Binary files exit 3 and print the
+`gh api …/git/blobs/<sha>` command to fetch them, instead of emitting mojibake.
+
 ## Exit codes
 
 | Code | Meaning |

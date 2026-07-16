@@ -225,11 +225,35 @@ def cmd_cat(args):
     payload = json.loads(out)
     if isinstance(payload, list) or payload.get("type") != "file":
         raise GitxError(3, f"{ref}:{path} is not a file in {repo}")
-    content = _b64.b64decode(payload["content"]).decode("utf-8", "replace")
+    content = _decode_blob(repo, ref, path, payload)
     return {
         "ref": ref, "path": path,
         "sha": payload["sha"], "size": payload["size"], "content": content,
     }
+
+
+def _decode_blob(repo, ref, path, payload):
+    """Return the file's text, escalating past the contents API's 1MB cap.
+
+    Above 1MB the contents API returns `encoding: "none"` and an EMPTY content field
+    with HTTP 200 — decoding that naively yields "" and reports a real file as empty.
+    Escalate to the blobs API (100MB cap) by sha, and refuse binary loudly rather than
+    emitting replacement-char mojibake.
+    """
+    b64 = payload.get("content") or ""
+    size = payload.get("size") or 0
+    if not b64 and size:
+        blob = json.loads(gh(["api", f"/repos/{repo}/git/blobs/{payload['sha']}"]))
+        b64 = blob.get("content") or ""
+        if not b64:
+            raise GitxError(3, f"{ref}:{path} is {size} bytes — too large to fetch "
+                               f"(blob API caps at 100MB)")
+    raw = _b64.b64decode(b64)
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise GitxError(3, f"{ref}:{path} is binary ({size} bytes); gitx cat serves text. "
+                           f"Fetch it with: gh api /repos/{repo}/git/blobs/{payload['sha']}")
 
 
 def cmd_pr(args):

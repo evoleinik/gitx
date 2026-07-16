@@ -278,3 +278,52 @@ def test_cmd_pr_no_merge_when_flag_absent(monkeypatch):
     result = gitx.cmd_pr(args)
     assert result["number"] == 9
     assert not any(a[:2] == ["pr", "merge"] for a in seen)
+
+
+def test_cmd_cat_large_file_escalates_to_blob_api(monkeypatch):
+    # >1MB: contents API returns encoding "none" + EMPTY content at HTTP 200.
+    # Naive decode would report a real file as empty; we must escalate to the blob.
+    monkeypatch.setattr(gitx, "resolve_repo", lambda e: "owner/repo")
+    seen = []
+    contents = {"type": "file", "sha": "blobsha", "size": 2595105,
+                "content": "", "encoding": "none"}
+    blob = {"encoding": "base64", "size": 2595105,
+            "content": base64.b64encode(b"real big content").decode()}
+
+    def fake_gh(a, stdin=None):
+        seen.append(a)
+        if "/git/blobs/" in a[1]:
+            return json.dumps(blob)
+        return json.dumps(contents)
+
+    monkeypatch.setattr(gitx, "gh", fake_gh)
+    import argparse
+    args = argparse.Namespace(ref_path="main:big.txt", repo=None, json=True)
+    result = gitx.cmd_cat(args)
+    assert result["content"] == "real big content"
+    assert result["size"] == 2595105
+    assert any("/git/blobs/blobsha" in a[1] for a in seen), "must escalate to blobs API"
+
+
+def test_cmd_cat_binary_refuses_loudly(monkeypatch):
+    monkeypatch.setattr(gitx, "resolve_repo", lambda e: "owner/repo")
+    payload = {"type": "file", "sha": "s", "size": 4,
+               "content": base64.b64encode(b"\x89PNG\xff\xfe").decode(), "encoding": "base64"}
+    monkeypatch.setattr(gitx, "gh", lambda a, stdin=None: json.dumps(payload))
+    import argparse
+    args = argparse.Namespace(ref_path="main:img.png", repo=None, json=True)
+    with pytest.raises(gitx.GitxError) as e:
+        gitx.cmd_cat(args)
+    assert e.value.code == 3 and "binary" in e.value.msg
+
+
+def test_cmd_cat_oversized_blob_fails_loudly(monkeypatch):
+    monkeypatch.setattr(gitx, "resolve_repo", lambda e: "owner/repo")
+    contents = {"type": "file", "sha": "s", "size": 200_000_000, "content": "", "encoding": "none"}
+    monkeypatch.setattr(gitx, "gh", lambda a, stdin=None: json.dumps(
+        contents if "/contents/" in a[1] else {"content": ""}))
+    import argparse
+    args = argparse.Namespace(ref_path="main:huge.bin", repo=None, json=True)
+    with pytest.raises(gitx.GitxError) as e:
+        gitx.cmd_cat(args)
+    assert e.value.code == 3 and "too large" in e.value.msg

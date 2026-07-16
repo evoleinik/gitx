@@ -5,6 +5,7 @@ import base64 as _b64
 import json
 import os
 import posixpath
+import signal
 import subprocess
 import sys
 import time
@@ -93,6 +94,8 @@ def usage_dir():
 
 def log_usage(cmd, ok, ms, error):
     """Append one JSON line to usage_dir()/usage.jsonl with telemetry."""
+    if os.environ.get("DO_NOT_TRACK") == "1":
+        return
     line = json.dumps({
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "cmd": cmd,
@@ -100,7 +103,11 @@ def log_usage(cmd, ok, ms, error):
         "ms": ms,
         "error": error,
     })
-    with open(os.path.join(usage_dir(), "usage.jsonl"), "a") as f:
+    path = os.path.join(usage_dir(), "usage.jsonl")
+    if not os.path.exists(path):
+        print(f"gitx: logging usage to {path} — set DO_NOT_TRACK=1 to disable",
+              file=sys.stderr)
+    with open(path, "a") as f:
         f.write(line + "\n")
 
 
@@ -345,6 +352,14 @@ def main(argv=None):
         return 1
 
     start = time.time()
+
+    def _morgue(signum, frame):
+        log_usage(args.cmd, False, int((time.time() - start) * 1000),
+                  f"killed by {signal.Signals(signum).name}")
+        sys.exit(128 + signum)
+    signal.signal(signal.SIGTERM, _morgue)
+    signal.signal(signal.SIGINT, _morgue)
+
     try:
         if args.cmd == "put":
             result = cmd_put(args)

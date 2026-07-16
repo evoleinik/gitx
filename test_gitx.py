@@ -94,6 +94,43 @@ def test_log_usage_appends_jsonl(tmp_path, monkeypatch):
     assert second["ok"] is False and second["error"] == "not found"
 
 
+def test_do_not_track_suppresses(tmp_path, monkeypatch):
+    monkeypatch.setenv("GITX_HOME", str(tmp_path))
+    monkeypatch.setenv("DO_NOT_TRACK", "1")
+    gitx.log_usage("put", True, 1, None)
+    assert not (tmp_path / "usage.jsonl").exists()
+
+
+def test_first_write_notice_on_stderr(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("GITX_HOME", str(tmp_path))
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    gitx.log_usage("put", True, 1, None)
+    captured = capsys.readouterr()
+    assert "logging usage to" in captured.err
+    assert "DO_NOT_TRACK=1" in captured.err
+    # second write must not repeat the notice
+    gitx.log_usage("put", True, 1, None)
+    captured2 = capsys.readouterr()
+    assert "logging usage to" not in captured2.err
+
+
+def test_sigterm_writes_morgue(tmp_path):
+    import subprocess as sp, signal, os as _os
+    env = dict(_os.environ, GITX_HOME=str(tmp_path))
+    env.pop("DO_NOT_TRACK", None)
+    p = sp.Popen(["python3", os.path.join(_here, "gitx"), "cat", "main:README.md"],
+                 env=env, stdout=sp.PIPE, stderr=sp.PIPE)
+    import time as _t
+    _t.sleep(0.05)
+    p.send_signal(signal.SIGTERM)
+    p.wait(timeout=10)
+    lines = (tmp_path / "usage.jsonl").read_text().strip().splitlines() if (tmp_path / "usage.jsonl").exists() else []
+    assert lines, "no record written at all"
+    rec = json.loads(lines[-1])
+    assert rec["ok"] is False
+    assert "SIGTERM" in (rec["error"] or "")
+
+
 def test_gh_maps_auth_error(monkeypatch):
     class FakeProc:
         returncode = 1

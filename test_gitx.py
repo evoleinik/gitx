@@ -327,3 +327,10 @@ def test_cmd_cat_oversized_blob_fails_loudly(monkeypatch):
     with pytest.raises(gitx.GitxError) as e:
         gitx.cmd_cat(args)
     assert e.value.code == 3 and "too large" in e.value.msg
+
+
+def test_usage_error_exits_1_not_2():
+    # exit 2 is documented as gh-not-authed; a missing --title must not emit it
+    with pytest.raises(SystemExit) as e:
+        gitx.main(["pr", "main", "branch"])  # --title/--body missing
+    assert e.value.code == 1

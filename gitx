@@ -299,8 +299,19 @@ def _print_usage():
     return 0
 
 
+class _Parser(argparse.ArgumentParser):
+    """Usage errors exit 1 (general), not argparse's default 2 — exit 2 is
+    documented to mean gh-not-authed, and a missing --title must not send an
+    agent off to run `gh auth login`. Subparsers inherit this class."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        print(f"{self.prog}: error: {message}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="gitx")
+    parser = _Parser(prog="gitx")
     parser.add_argument("--usage", action="store_true", help="print usage stats and exit")
     sub = parser.add_subparsers(dest="cmd")
 

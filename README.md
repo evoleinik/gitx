@@ -4,6 +4,9 @@ Stateless git lane for agents. Commit files to a GitHub branch with no checkout 
 no cwd, HEAD, index, or working tree to get wrong. Thin wrapper over
 `gh api` + GraphQL `createCommitOnBranch`.
 
+One of a stateless trio: `gitx` writes, [`gitw`](https://github.com/evoleinik/gitw) orients (where am I, in one read), and
+[`ghpr`](https://github.com/evoleinik/ghpr) reads a PR's merge safety before you merge it.
+
 ## Install
 
     ln -sf ~/src/gitx/gitx ~/bin/gitx   # needs gh (authed) + python3 on PATH

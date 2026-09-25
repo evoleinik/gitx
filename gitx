@@ -2,9 +2,12 @@
 """gitx — stateless git lane for agents. See README.md."""
 import argparse
 import base64 as _b64
+import bisect
+import hashlib
 import json
 import os
 import posixpath
+import shlex
 import signal
 import subprocess
 import sys
@@ -13,10 +16,15 @@ from urllib.parse import quote
 
 
 class GitxError(Exception):
-    def __init__(self, code, msg):
+    def __init__(self, code, msg, data=None):
         super().__init__(msg)
         self.code = code
         self.msg = msg
+        self.data = data or {}
+
+
+ERROR_NAMES = {1: "error", 2: "not_authenticated", 3: "not_found",
+               4: "head_conflict", 5: "unseen_change"}
 
 
 def validate_repo_path(path):
@@ -160,20 +168,194 @@ def branch_head_oid(repo, branch):
     return out or None
 
 
-def ensure_branch(repo, branch, from_ref):
-    oid = branch_head_oid(repo, branch)
-    if oid:
-        return oid
-    base = from_ref or repo_default_branch(repo)
-    base_oid = branch_head_oid(repo, base)
-    if not base_oid:
-        raise GitxError(3, f"base ref {base!r} not found in {repo}")
+def start_oid(repo, from_ref):
+    """The commit a missing branch will be created at."""
+    start = from_ref or repo_default_branch(repo)
+    oid = branch_head_oid(repo, start)
+    if not oid:
+        raise GitxError(3, f"base ref {start!r} not found in {repo}")
+    return oid
+
+
+def create_branch(repo, branch, oid):
     gh([
         "api", "-X", "POST", f"/repos/{repo}/git/refs",
         "-f", f"ref=refs/heads/{branch}",
-        "-f", f"sha={base_oid}",
+        "-f", f"sha={oid}",
     ])
-    return base_oid
+
+
+# --- overwrite guard -------------------------------------------------------
+# `put` sends whole files. If the branch changed a file after the caller read it,
+# a blind put erases that change (airshelf 4cffc4f9c erased a29cecbce's row,
+# 2026-09-25). So put refuses when the branch holds a version the caller never saw.
+# What counts as "seen" depends on what gitx can know about where the copy came from:
+#   base      --base <rev>: the version at that commit.
+#   checkout  cwd is the top of a checkout of the repo: every version in HEAD's
+#             history of the path, plus the staged copy.
+#   content   nothing known: refuse only if the put would drop a line the branch has.
+
+_BLOBS_QUERY = """query($owner:String!,$name:String!,$rev:String!%s){
+  repository(owner:$owner,name:$name){ rev: object(expression:$rev){ oid } %s }
+}"""
+
+_LOG_QUERY = """query($owner:String!,$name:String!,$rev:String!,$path:String!,$n:Int!){
+  repository(owner:$owner,name:$name){ object(expression:$rev){ ... on Commit {
+    history(first:$n, path:$path){ nodes{ oid messageHeadline file(path:$path){ oid } } }
+  } } }
+}"""
+
+LOG_LIMIT = 10
+
+
+def _graphql(repo, query, variables):
+    owner, name = repo.split("/", 1)
+    body = {"query": query, "variables": dict(variables, owner=owner, name=name)}
+    return json.loads(gh(["api", "graphql", "--input", "-"], stdin=json.dumps(body)))["data"]
+
+
+def remote_blobs(repo, rev, paths):
+    """(commit oid of rev or None, {path: blob oid or None}) in one query."""
+    decl = "".join(f",$e{i}:String!" for i in range(len(paths)))
+    fields = " ".join(f"p{i}: object(expression:$e{i}){{ oid }}" for i in range(len(paths)))
+    variables = {"rev": rev, **{f"e{i}": f"{rev}:{p}" for i, p in enumerate(paths)}}
+    r = _graphql(repo, _BLOBS_QUERY % (decl, fields), variables)["repository"]
+    oid = (r.get("rev") or {}).get("oid")
+    return oid, {p: (r.get(f"p{i}") or {}).get("oid") for i, p in enumerate(paths)}
+
+
+def path_log(repo, rev, path, n):
+    """Newest-first commits at rev that touched path: [{sha, subject, blob}]."""
+    obj = _graphql(repo, _LOG_QUERY, {"rev": rev, "path": path, "n": n})["repository"]["object"]
+    nodes = ((obj or {}).get("history") or {}).get("nodes") or []
+    return [{"sha": c["oid"], "subject": c["messageHeadline"],
+             "blob": (c.get("file") or {}).get("oid")} for c in nodes]
+
+
+def git_blob_oid(data):
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _git(*args):
+    p = subprocess.run(["git", *args], capture_output=True, text=True)
+    return p.stdout.strip() if p.returncode == 0 else None
+
+
+def _repo_from_url(url):
+    """owner/name from an https or ssh GitHub remote URL."""
+    tail = url.rstrip("/").removesuffix(".git").replace(":", "/")
+    return "/".join(tail.split("/")[-2:]).lower()
+
+
+def checkout_seen(repo, paths):
+    """{path: blobs the cwd checkout has held}, or None if cwd is not its top."""
+    top = _git("rev-parse", "--show-toplevel")
+    url = _git("remote", "get-url", "origin")
+    if not top or not url or os.path.realpath(top) != os.path.realpath(os.getcwd()):
+        return None
+    if _repo_from_url(url) != repo.lower():
+        return None
+    seen = {}
+    for p in paths:
+        raw = _git("log", "--raw", "--no-abbrev", "--format=", "HEAD", "--", p) or ""
+        blobs = {b for line in raw.splitlines() if line.startswith(":")
+                 for b in line.split()[2:4]}
+        staged = (_git("ls-files", "-s", "--", p) or "").split()
+        blobs |= {_git("rev-parse", "-q", "--verify", f"HEAD:{p}"),
+                  staged[1] if len(staged) > 1 else None}
+        seen[p] = blobs - {None, "0" * 40}
+    return seen
+
+
+def resolve_seen(repo, base, paths):
+    """(mode, base oid, {path: seen blobs}) for the guard."""
+    if base:
+        oid, blobs = remote_blobs(repo, base, paths)
+        if not oid:
+            raise GitxError(3, f"--base {base!r} is not a commit in {repo}. Pass the commit "
+                               f"you read the files at (gitx cat --json prints it as .commit)")
+        return "base", oid, {p: {b} - {None} for p, b in blobs.items()}
+    seen = checkout_seen(repo, paths)
+    if seen is not None:
+        return "checkout", None, seen
+    return "content", None, {p: set() for p in paths}
+
+
+def _missing_lines(theirs, mine):
+    """Lines of theirs that mine drops. Empty iff theirs is a subsequence of mine,
+    i.e. mine only inserts lines. Greedy match on a line → positions index."""
+    positions = {}
+    for k, line in enumerate(mine.splitlines()):
+        positions.setdefault(line, []).append(k)
+    i, missing = 0, []
+    for line in theirs.splitlines():
+        ps = positions.get(line, [])
+        j = bisect.bisect_left(ps, i)
+        if j < len(ps):
+            i = ps[j] + 1
+        else:
+            missing.append(line)
+    return missing
+
+
+def _remote_text(repo, oid):
+    blob = json.loads(gh(["api", f"/repos/{repo}/git/blobs/{oid}"]))
+    return _b64.b64decode(blob.get("content") or "")
+
+
+def guard(repo, args, head, files, mode, base, seen):
+    """Raise GitxError(5) if putting files at head would erase a version not seen."""
+    _, blobs = remote_blobs(repo, head, [p for p, _ in files])
+    refused = []
+    for path, data in files:
+        theirs = blobs[path]
+        if theirs is None or theirs == git_blob_oid(data) or theirs in seen[path]:
+            continue
+        entry = {"path": path, "branch_blob": theirs}
+        if mode == "content":
+            text = _remote_text(repo, theirs)
+            missing = _missing_lines(text.decode("utf-8", "replace"),
+                                     data.decode("utf-8", "replace"))
+            if not missing:
+                continue
+            entry["missing_lines"] = missing[:3]
+        log = path_log(repo, head, path, LOG_LIMIT)
+        unseen = []
+        for c in log:
+            if c["blob"] in seen[path]:
+                break
+            unseen.append({"sha": c["sha"], "subject": c["subject"]})
+        entry["commits"] = unseen
+        entry["truncated"] = len(unseen) == len(log) == LOG_LIMIT
+        refused.append(entry)
+    if refused:
+        raise _unseen_change(repo, args, head, mode, base, refused)
+
+
+def _unseen_change(repo, args, head, mode, base, refused):
+    why = {
+        "base": f"changed since --base {(base or '')[:9]}",
+        "checkout": "holds a version this checkout has never had",
+        "content": "has lines your copy lacks, and gitx cannot tell which version you read",
+    }[mode]
+    names = ", ".join(e["path"] for e in refused)
+    put = ["gitx", "put", args.branch, *args.paths, "-m", args.message,
+           "--repo", repo, "--base", head]
+    if args.from_ref:
+        put += ["--from", args.from_ref]
+    fix = [shlex.join(["gitx", "cat", f"{head}:{e['path']}", "--repo", repo])
+           for e in refused] + [shlex.join(put)]
+    lines = [f"refusing to overwrite: {args.branch} {why}: {names}"]
+    for e in refused:
+        lines += [f"  {e['path']}" + (" (recent commits):" if mode == "content" else ":")]
+        lines += [f"    {c['sha'][:9]} {c['subject']}" for c in e["commits"]]
+        lines += [f"    missing line: {m}" for m in e.get("missing_lines", [])]
+    lines += ["Fix: read the branch copy, re-apply your change to it, put against that commit:"]
+    lines += [f"  {c}" for c in fix]
+    lines += ["Or overwrite on purpose, dropping the changes above: add --force"]
+    data = {"repo": repo, "branch": args.branch, "head": head, "mode": mode,
+            "base": base, "paths": refused, "fix": fix}
+    return GitxError(5, "\n".join(lines), data)
 
 
 def run_commit(repo, branch, message, head_oid, files):
@@ -198,20 +380,29 @@ def _read_files(paths):
 
 def cmd_put(args):
     repo = resolve_repo(args.repo)
-    head = ensure_branch(repo, args.branch, args.from_ref)
     files = _read_files(args.paths)
-    try:
-        commit = run_commit(repo, args.branch, args.message, head, files)
-    except GitxError as e:
-        if not is_stale_head_error(e.msg):
-            raise
-        head = branch_head_oid(repo, args.branch)
+    if not args.force:
+        mode, base, seen = resolve_seen(repo, args.base, [p for p, _ in files])
+    head = branch_head_oid(repo, args.branch)
+    create = head is None
+    if create:
+        head = start_oid(repo, args.from_ref)
+    for attempt in (1, 2):
+        # Re-check on retry: the commit that moved the head may be the race itself.
+        if not args.force:
+            guard(repo, args, head, files, mode, base, seen)
+        if create:
+            create_branch(repo, args.branch, head)
+            create = False
         try:
             commit = run_commit(repo, args.branch, args.message, head, files)
-        except GitxError as e2:
-            if is_stale_head_error(e2.msg):
+            break
+        except GitxError as e:
+            if not is_stale_head_error(e.msg):
+                raise
+            if attempt == 2:
                 raise GitxError(4, f"head moved twice under us on {args.branch}; retry")
-            raise
+            head = branch_head_oid(repo, args.branch)
     return {
         "sha": commit["sha"],
         "url": commit["url"],
@@ -224,9 +415,13 @@ def cmd_cat(args):
     ref, path = parse_ref_path(args.ref_path)
     repo = resolve_repo(args.repo)
     try:
-        out = gh(["api", f"/repos/{repo}/contents/{path}?ref={quote(ref, safe='')}"])
+        # Resolve once and read at that commit, so .commit is exactly what was read:
+        # it is the --base for a later put of this file.
+        commit = gh(["api", "-H", "Accept: application/vnd.github.sha",
+                     f"/repos/{repo}/commits/{quote(ref, safe='')}"]).strip()
+        out = gh(["api", f"/repos/{repo}/contents/{path}?ref={commit}"])
     except GitxError as e:
-        if "404" in e.msg:
+        if "404" in e.msg or "422" in e.msg:
             raise GitxError(3, f"{ref}:{path} not found in {repo}")
         raise
     payload = json.loads(out)
@@ -234,7 +429,7 @@ def cmd_cat(args):
         raise GitxError(3, f"{ref}:{path} is not a file in {repo}")
     content = _decode_blob(repo, ref, path, payload)
     return {
-        "ref": ref, "path": path,
+        "ref": ref, "commit": commit, "path": path,
         "sha": payload["sha"], "size": payload["size"], "content": content,
     }
 
@@ -317,7 +512,7 @@ class _Parser(argparse.ArgumentParser):
         sys.exit(1)
 
 
-def main(argv=None):
+def build_parser():
     parser = _Parser(prog="gitx")
     parser.add_argument("--usage", action="store_true", help="print usage stats and exit")
     sub = parser.add_subparsers(dest="cmd")
@@ -328,6 +523,9 @@ def main(argv=None):
     p_put.add_argument("-m", "--message", required=True)
     p_put.add_argument("--repo")
     p_put.add_argument("--from", dest="from_ref")
+    p_put.add_argument("--base", help="commit your copy of the files was read at")
+    p_put.add_argument("--force", action="store_true",
+                       help="overwrite even if the branch changed the files since your copy")
     p_put.add_argument("--json", action="store_true")
 
     p_cat = sub.add_parser("cat", help="read a file at a ref")
@@ -343,7 +541,11 @@ def main(argv=None):
     p_pr.add_argument("--merge", action="store_true")
     p_pr.add_argument("--repo")
     p_pr.add_argument("--json", action="store_true")
+    return parser
 
+
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
     if args.usage:
         return _print_usage()
@@ -376,8 +578,12 @@ def main(argv=None):
         log_usage(args.cmd, True, int((time.time() - start) * 1000), None)
         return 0
     except GitxError as e:
-        print(e.msg, file=sys.stderr)
-        log_usage(args.cmd, False, int((time.time() - start) * 1000), e.msg)
+        if args.json:
+            print(json.dumps({"error": ERROR_NAMES.get(e.code, "error"), "code": e.code,
+                              "message": e.msg.splitlines()[0], **e.data}))
+        else:
+            print(e.msg, file=sys.stderr)
+        log_usage(args.cmd, False, int((time.time() - start) * 1000), e.msg.splitlines()[0])
         return e.code
 
 
